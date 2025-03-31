@@ -12,33 +12,19 @@ use serde_json::Value;
 
 pub struct RateLimiter {
     last_call_time: Mutex<HashMap<String, Instant>>,
-    restricted_endpoints: Vec<String>,
 }
 
 impl RateLimiter {
     pub fn new() -> Self {
         Self {
             last_call_time: Mutex::new(HashMap::new()),
-            restricted_endpoints: vec![
-                "/paper/batch".to_string(),
-                "/paper/search".to_string(),
-                "/recommendations".to_string(),
-            ],
         }
     }
 
     pub async fn acquire(&self, endpoint: &str) -> Result<()> {
         let mut last_call_map = self.last_call_time.lock().await;
 
-        let rate_limit = if self
-            .restricted_endpoints
-            .iter()
-            .any(|restricted| endpoint.contains(restricted))
-        {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_millis(100)
-        };
+        let rate_limit = Duration::from_secs(1);
 
         if let Some(last_call) = last_call_map.get(endpoint) {
             let elapsed = last_call.elapsed();
@@ -72,39 +58,74 @@ pub async fn make_request(
 
     let api_key = std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok();
 
-    let mut request_builder = Request::builder().method("GET").uri(url.as_str());
+    let max_retries = 5;
+    let mut retry_delay = Duration::from_millis(100);
 
-    if let Some(key) = api_key {
-        request_builder = request_builder.header("x-api-key", key);
-    }
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
 
-    let request = request_builder.header("Accept", "application/json").end()?;
+        let mut request_builder = Request::builder().method("GET").uri(url.as_str());
 
-    let response = http_client.send(request).await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-
-        if status == 429 {
-            return Err(anyhow!(
-                "Rate limit exceeded. Consider using an API key for higher limits."
-            ));
-        } else if status == 404 {
-            return Err(anyhow!("Resource not found: {}", error_body));
+        if let Some(key) = &api_key {
+            request_builder = request_builder.header("x-api-key", key);
         }
 
-        return Err(anyhow!("HTTP error {}: {}", status, error_body));
-    }
+        let request = request_builder.header("Accept", "application/json").end()?;
+        let response = http_client.send(request).await;
 
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))?;
-    Ok(body)
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    let body: Value = response
+                        .json()
+                        .await
+                        .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))?;
+                    return Ok(body);
+                } else {
+                    let error_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+
+                    if status == 429 || status == 503 || status == 502 {
+                        // Rate limiting or server errors - we can retry these
+                        if attempts <= max_retries {
+                            Delay::new(retry_delay).await;
+                            // Exponential backoff
+                            retry_delay = retry_delay * 2;
+                            continue;
+                        } else {
+                            return Err(anyhow!(
+                                "Rate limit exceeded after {} retries. Consider using an API key for higher limits.",
+                                max_retries
+                            ));
+                        }
+                    } else if status == 404 {
+                        return Err(anyhow!("Resource not found: {}", error_body));
+                    } else {
+                        return Err(anyhow!("HTTP error {}: {}", status, error_body));
+                    }
+                }
+            }
+            Err(e) => {
+                // Network errors might be transient, so we retry
+                if attempts <= max_retries {
+                    Delay::new(retry_delay).await;
+                    // Exponential backoff
+                    retry_delay = retry_delay * 2;
+                    continue;
+                } else {
+                    return Err(anyhow!(
+                        "Request failed after {} attempts: {}",
+                        max_retries,
+                        e
+                    ));
+                }
+            }
+        }
+    }
 }
 
 fn build_query_string(params: &Value) -> Result<String> {
