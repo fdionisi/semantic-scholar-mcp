@@ -1,0 +1,19 @@
+[package]
+name = "semantic_scholar_mcp_tools"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/semantic_scholar_mcp_tools.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+context-server.workspace = true
+futures = "0.3"
+futures-timer = "3.0.3"
+http-client.workspace = true
+log.workspace = true
+serde_json.workspace = true
+urlencoding.workspace = true
