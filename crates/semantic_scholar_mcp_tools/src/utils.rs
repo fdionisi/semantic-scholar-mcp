@@ -44,11 +44,12 @@ pub async fn make_request(
     rate_limiter: &Arc<RateLimiter>,
     endpoint: &str,
     params: Option<&Value>,
+    base_url: Option<&str>,
 ) -> Result<Value> {
     // Apply rate limiting
     rate_limiter.acquire(endpoint).await?;
 
-    let base_url = "https://api.semanticscholar.org/graph/v1";
+    let base_url = base_url.unwrap_or("https://api.semanticscholar.org/graph/v1");
     let url = if let Some(params) = params {
         let query_string = build_query_string(params)?;
         format!("{}{}?{}", base_url, endpoint, query_string)

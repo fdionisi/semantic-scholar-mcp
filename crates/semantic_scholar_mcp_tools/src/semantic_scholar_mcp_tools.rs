@@ -3,7 +3,7 @@ mod utils;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use context_server::{Tool, ToolContent, ToolExecutor};
-use http_client::{HttpClient, Request, RequestBuilderExt, ResponseAsyncBodyExt};
+use http_client::HttpClient;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -167,6 +167,7 @@ impl ToolExecutor for PaperSearchTool {
             &self.rate_limiter,
             "/paper/search",
             Some(&params),
+            None,
         )
         .await?;
 
@@ -437,6 +438,7 @@ impl ToolExecutor for PaperDetailsTool {
             &self.rate_limiter,
             &format!("/paper/{}", paper_id),
             Some(&params),
+            None,
         )
         .await?;
 
@@ -659,6 +661,7 @@ impl ToolExecutor for PaperCitationsTool {
             &self.rate_limiter,
             &format!("/paper/{}/citations", paper_id),
             Some(&params),
+            None,
         )
         .await?;
 
@@ -884,6 +887,7 @@ impl ToolExecutor for PaperReferencesTool {
             &self.rate_limiter,
             &format!("/paper/{}/references", paper_id),
             Some(&params),
+            None,
         )
         .await?;
 
@@ -1130,6 +1134,7 @@ impl ToolExecutor for AuthorSearchTool {
             &self.rate_limiter,
             "/author/search",
             Some(&params),
+            None,
         )
         .await?;
 
@@ -1368,6 +1373,7 @@ impl ToolExecutor for AuthorDetailsTool {
             &self.rate_limiter,
             &format!("/author/{}", author_id),
             Some(&params),
+            None,
         )
         .await?;
 
@@ -1570,6 +1576,7 @@ impl ToolExecutor for AuthorPapersTool {
             &self.rate_limiter,
             &format!("/author/{}/papers", author_id),
             Some(&params),
+            None,
         )
         .await?;
 
@@ -1757,47 +1764,21 @@ impl ToolExecutor for PaperRecommendationSingleTool {
             ));
         }
 
-        self.rate_limiter.acquire("/recommendations").await?;
+        let mut params_map = serde_json::Map::new();
+        params_map.insert("limit".to_string(), json!(limit));
+        params_map.insert("fields".to_string(), json!(fields));
+        params_map.insert("from".to_string(), json!(from_pool));
 
-        let url = format!(
-            "https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{}?limit={}&fields={}&from={}",
-            paper_id, limit, fields, from_pool
-        );
+        let params = Value::Object(params_map);
 
-        let api_key = std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok();
-
-        let mut request_builder = Request::builder().method("GET").uri(url.as_str());
-
-        if let Some(key) = api_key {
-            request_builder = request_builder.header("x-api-key", key);
-        }
-
-        let request = request_builder.header("Accept", "application/json").end()?;
-
-        let response = self.http_client.send(request).await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            if status == 429 {
-                return Err(anyhow!(
-                    "Rate limit exceeded. Consider using an API key for higher limits."
-                ));
-            } else if status == 404 {
-                return Err(anyhow!("Paper not found: {}", error_body));
-            }
-
-            return Err(anyhow!("HTTP error {}: {}", status, error_body));
-        }
-
-        let result: Value = response
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))?;
+        let result = utils::make_request(
+            &self.http_client,
+            &self.rate_limiter,
+            &format!("/recommendations/v1/papers/forpaper/{}", paper_id),
+            Some(&params),
+            Some("https://api.semanticscholar.org"),
+        )
+        .await?;
 
         let formatted_result = self.format_recommendations(&result)?;
 
@@ -1986,57 +1967,21 @@ impl ToolExecutor for PaperRecommendationMultiTool {
             return Err(anyhow!("Limit cannot exceed 500"));
         }
 
-        self.rate_limiter.acquire("/recommendations").await?;
-
         let request_body = json!({
             "positivePaperIds": positive_ids,
-            "negativePaperIds": negative_paper_ids
+            "negativePaperIds": negative_paper_ids,
+            "fields": fields,
+            "limit": limit
         });
 
-        let url = format!(
-            "https://api.semanticscholar.org/recommendations/v1/papers?limit={}&fields={}",
-            limit, fields
-        );
-
-        let api_key = std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok();
-
-        let mut request_builder = Request::builder()
-            .method("POST")
-            .uri(url.as_str())
-            .header("Content-Type", "application/json");
-
-        if let Some(key) = api_key {
-            request_builder = request_builder.header("x-api-key", key);
-        }
-
-        let request = request_builder
-            .header("Accept", "application/json")
-            .json(request_body)?;
-
-        let response = self.http_client.send(request).await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-
-            if status == 429 {
-                return Err(anyhow!(
-                    "Rate limit exceeded. Consider using an API key for higher limits."
-                ));
-            } else if status == 404 {
-                return Err(anyhow!("One or more papers not found: {}", error_body));
-            }
-
-            return Err(anyhow!("HTTP error {}: {}", status, error_body));
-        }
-
-        let result: Value = response
-            .json()
-            .await
-            .map_err(|e| anyhow!("Failed to parse JSON response: {}", e))?;
+        let result = utils::make_request(
+            &self.http_client,
+            &self.rate_limiter,
+            "/recommendations/v1/papers",
+            Some(&request_body),
+            Some("https://api.semanticscholar.org"),
+        )
+        .await?;
 
         let formatted_result = self.format_recommendations(&result)?;
 
