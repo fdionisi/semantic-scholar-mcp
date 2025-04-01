@@ -9,8 +9,10 @@ path = "src/semantic_scholar_mcp_tools.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+cache = { path = "../cache" }
 chrono.workspace = true
 context-server.workspace = true
+embed = { path = "../embed" }
 futures = "0.3"
 futures-timer = "3.0.3"
 http-client.workspace = true

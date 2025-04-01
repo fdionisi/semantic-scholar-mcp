@@ -1,0 +1,11 @@
+[package]
+name = "ollama_embed"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+async-trait = "0.1"
+embed = { path = "../embed" }
+ollama = { git = "https://github.com/fdionisi/ollama", version = "0.1.1" }
+http-client.workspace = true

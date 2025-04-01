@@ -46,7 +46,6 @@ pub async fn make_request(
     params: Option<&Value>,
     base_url: Option<&str>,
 ) -> Result<Value> {
-    // Apply rate limiting
     rate_limiter.acquire(endpoint).await?;
 
     let base_url = base_url.unwrap_or("https://api.semanticscholar.org/graph/v1");

@@ -1,0 +1,14 @@
+[package]
+name = "cache"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/cache.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+heed = "0.22"
+serde.workspace = true
+serde_json.workspace = true
