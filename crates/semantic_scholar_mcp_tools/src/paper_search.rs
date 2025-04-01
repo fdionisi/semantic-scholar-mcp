@@ -90,11 +90,7 @@ impl PaperSearchTool {
 
                 if let Some(abstract_text) = paper.get("abstract").and_then(|a| a.as_str()) {
                     if !abstract_text.is_empty() {
-                        let summary = if abstract_text.len() > 300 {
-                            format!("{}...", &abstract_text[0..300])
-                        } else {
-                            abstract_text.to_string()
-                        };
+                        let summary = abstract_text.to_string();
                         result.push_str(&format!("   Abstract: {}\n", summary));
                     }
                 }
