@@ -31,7 +31,7 @@ impl AuthorPapersTool {
         }
     }
 
-    pub(crate) fn format_author_papers(&self, response: &Value) -> Result<String> {
+    fn format_author_papers(&self, response: &Value) -> Result<String> {
         if response.get("error").is_some() {
             let message = response["error"]["message"]
                 .as_str()
@@ -163,58 +163,60 @@ impl ToolExecutor for AuthorPapersTool {
             return Err(anyhow!("Limit cannot exceed 1000"));
         }
 
-        // Create a query string to use for embedding and cache lookup
-        let query_string = format!(
-            "author_papers:{} offset:{} limit:{} fields:{:?}",
-            author_id, offset, limit, fields
-        );
+        // Build params object for the API request
+        let mut params_map = serde_json::Map::new();
+        params_map.insert("offset".to_string(), json!(offset));
+        params_map.insert("limit".to_string(), json!(limit));
 
-        // Generate embedding for the query
-        let embedding = self.embed.embed(&query_string).await?;
+        if let Some(f) = fields.clone() {
+            params_map.insert("fields".to_string(), f);
+        }
 
-        // Try to find similar queries in cache
+        let params = Value::Object(params_map);
+
+        // Generate an embedding for the query
+        let embedding = self.embed.embed(&author_id).await?;
+
+        // Check if we have a cached result for a similar query
         let similar_queries = self.cache.search_similarity(&embedding)?;
 
-        let result = if !similar_queries.is_empty() && similar_queries[0].1 > 0.95 {
-            // Use cached result if similarity is very high
-            log::debug!("Using cached result for author papers query");
-            similar_queries[0].0.results.clone()
-        } else {
-            // Otherwise make the API request
-            let mut params_map = serde_json::Map::new();
-            params_map.insert("offset".to_string(), json!(offset));
-            params_map.insert("limit".to_string(), json!(limit));
-
-            if let Some(f) = fields {
-                params_map.insert("fields".to_string(), f);
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "author_papers" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
             }
+        }
 
-            let params = Value::Object(params_map);
-
-            let api_result = make_request(
-                &self.http_client,
-                &self.rate_limiter,
-                &format!("/author/{}/papers", author_id),
-                Some(&params),
-                None,
-            )
-            .await?;
-
-            // Store the result in cache
-            let query = Query {
-                text: query_string,
-                embedding,
-                results: api_result.clone(),
-            };
-
-            if let Err(e) = self.cache.store(query) {
-                log::warn!("Failed to store query in cache: {}", e);
-            }
-
-            api_result
-        };
+        // Otherwise make the API request
+        let result = make_request(
+            &self.http_client,
+            &self.rate_limiter,
+            &format!("/author/{}/papers", author_id),
+            Some(&params),
+            None,
+        )
+        .await?;
 
         let formatted_result = self.format_author_papers(&result)?;
+
+        // Store the result in cache
+        let query = Query {
+            action: "author_papers".into(),
+            text: author_id.into(),
+            embedding,
+            params: Some(params),
+            results: json!(formatted_result),
+        };
+
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
+        }
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,

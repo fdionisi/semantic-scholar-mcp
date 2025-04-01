@@ -31,7 +31,7 @@ impl AuthorSearchTool {
         }
     }
 
-    pub(crate) fn format_author_search(&self, response: &Value) -> Result<String> {
+    fn format_author_search(&self, response: &Value) -> Result<String> {
         if response.get("error").is_some() {
             let message = response["error"]["message"]
                 .as_str()
@@ -192,28 +192,6 @@ impl ToolExecutor for AuthorSearchTool {
             return Err(anyhow!("Query string cannot be empty"));
         }
 
-        // Generate embedding for the query
-        let embedding = self.embed.embed(query).await?;
-
-        // Check cache for similar queries
-        let cached_results = self.cache.search_similarity(&embedding)?;
-
-        // If we found a similar query in cache, return those results
-        if !cached_results.is_empty() {
-            let (cached_query, similarity) = &cached_results[0];
-            // Only use cache if similarity is high enough
-            if *similarity > 0.95 {
-                log::debug!(
-                    "Using cached results for similar query with similarity {}",
-                    similarity
-                );
-                let formatted_result = self.format_author_search(&cached_query.results)?;
-                return Ok(vec![ToolContent::Text {
-                    text: formatted_result,
-                }]);
-            }
-        }
-
         let fields = args.get("fields").cloned();
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
@@ -233,6 +211,25 @@ impl ToolExecutor for AuthorSearchTool {
 
         let params = Value::Object(params_map);
 
+        // Generate an embedding for the query
+        let embedding = self.embed.embed(&query).await?;
+
+        // Check if we have a cached result for a similar query
+        let similar_queries = self.cache.search_similarity(&embedding)?;
+
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "author_search" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
+            }
+        }
+
         let result = make_request(
             &self.http_client,
             &self.rate_limiter,
@@ -242,14 +239,19 @@ impl ToolExecutor for AuthorSearchTool {
         )
         .await?;
 
-        // Store the result in cache
-        self.cache.store(Query {
-            text: query.to_string(),
-            embedding,
-            results: result.clone(),
-        })?;
-
         let formatted_result = self.format_author_search(&result)?;
+
+        let query = Query {
+            action: "author_search".into(),
+            text: query.into(),
+            embedding,
+            params: Some(params),
+            results: json!(formatted_result),
+        };
+
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
+        }
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,

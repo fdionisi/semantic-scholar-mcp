@@ -31,7 +31,7 @@ impl PaperCitationsTool {
         }
     }
 
-    pub(crate) fn format_citations(&self, response: &Value) -> Result<String> {
+    fn format_citations(&self, response: &Value) -> Result<String> {
         if response.get("error").is_some() {
             let message = response["error"]["message"]
                 .as_str()
@@ -171,30 +171,8 @@ impl ToolExecutor for PaperCitationsTool {
             return Err(anyhow!("Paper ID cannot be empty"));
         }
 
-        let query_text = format!("paper_citations:{}", paper_id);
-
-        // Generate embedding for the query
-        let embedding = self.embed.embed(&query_text).await?;
-
-        // Try to find similar queries in cache
-        let similar_queries = self.cache.search_similarity(&embedding)?;
-
-        if !similar_queries.is_empty() {
-            let (cached_query, similarity) = &similar_queries[0];
-            // If we have a very similar query, use the cached result
-            if *similarity > 0.95 {
-                log::debug!("Using cached result with similarity {}", similarity);
-                let formatted_result = self.format_citations(&cached_query.results)?;
-                return Ok(vec![ToolContent::Text {
-                    text: formatted_result,
-                }]);
-            }
-        }
-
         let fields = args.get("fields").cloned();
-
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
 
         if limit > 1000 {
@@ -211,6 +189,25 @@ impl ToolExecutor for PaperCitationsTool {
 
         let params = Value::Object(params_map);
 
+        // Generate an embedding for the query
+        let embedding = self.embed.embed(&paper_id).await?;
+
+        // Check if we have a cached result for a similar query
+        let similar_queries = self.cache.search_similarity(&embedding)?;
+
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "paper_citations" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
+            }
+        }
+
         let result = make_request(
             &self.http_client,
             &self.rate_limiter,
@@ -220,18 +217,19 @@ impl ToolExecutor for PaperCitationsTool {
         )
         .await?;
 
-        // Store the query and result in cache
-        let cache_entry = Query {
-            text: query_text,
+        let formatted_result = self.format_citations(&result)?;
+
+        let query = Query {
+            action: "paper_citations".into(),
+            text: paper_id.into(),
             embedding,
-            results: result.clone(),
+            params: Some(params),
+            results: json!(formatted_result),
         };
 
-        if let Err(e) = self.cache.store(cache_entry) {
-            log::warn!("Failed to store query in cache: {}", e);
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
         }
-
-        let formatted_result = self.format_citations(&result)?;
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,

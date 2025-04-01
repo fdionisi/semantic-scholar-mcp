@@ -6,6 +6,7 @@ use heed::{
     Database, Env, EnvOpenOptions,
     types::{SerdeJson, Str},
 };
+use uuid::Uuid;
 
 pub struct LocalCache {
     env: Env,
@@ -39,7 +40,7 @@ impl LocalCache {
 impl Cache for LocalCache {
     fn store(&self, query: Query) -> Result<()> {
         let mut write_txn = self.env.write_txn()?;
-        let key = query.text.clone();
+        let key = Uuid::new_v4().to_string();
         let entry = CacheEntry {
             created_at: chrono::Utc::now().naive_utc(),
             value: query,

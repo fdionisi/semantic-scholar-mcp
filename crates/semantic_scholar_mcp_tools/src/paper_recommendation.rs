@@ -159,55 +159,54 @@ impl ToolExecutor for PaperRecommendationSingleTool {
             ));
         }
 
-        // Create a query string that uniquely identifies this request
-        let query_text = format!(
-            "paper_recommendations_single:{}:{}:{}:{}",
-            paper_id, fields, limit, from_pool
-        );
+        let mut params_map = serde_json::Map::new();
+        params_map.insert("limit".to_string(), json!(limit));
+        params_map.insert("fields".to_string(), json!(fields));
+        params_map.insert("from".to_string(), json!(from_pool));
+
+        let params = Value::Object(params_map);
 
         // Generate an embedding for the query
-        let embedding = self.embed.embed(&query_text).await?;
+        let embedding = self.embed.embed(&paper_id).await?;
 
-        // Check if we have a cached result
+        // Check if we have a cached result for a similar query
         let similar_queries = self.cache.search_similarity(&embedding)?;
 
-        let result = if !similar_queries.is_empty() && similar_queries[0].1 > 0.95 {
-            // Use the cached result if similarity is high enough
-            log::debug!("Using cached recommendation result");
-            similar_queries[0].0.results.clone()
-        } else {
-            // Otherwise make the API request
-            let mut params_map = serde_json::Map::new();
-            params_map.insert("limit".to_string(), json!(limit));
-            params_map.insert("fields".to_string(), json!(fields));
-            params_map.insert("from".to_string(), json!(from_pool));
-
-            let params = Value::Object(params_map);
-
-            let api_result = make_request(
-                &self.http_client,
-                &self.rate_limiter,
-                &format!("/recommendations/v1/papers/forpaper/{}", paper_id),
-                Some(&params),
-                Some("https://api.semanticscholar.org"),
-            )
-            .await?;
-
-            // Store the result in cache
-            let cache_entry = Query {
-                text: query_text,
-                embedding,
-                results: api_result.clone(),
-            };
-
-            if let Err(err) = self.cache.store(cache_entry) {
-                log::warn!("Failed to cache recommendation results: {}", err);
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "paper_recommendations_single" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
             }
+        }
 
-            api_result
-        };
+        let result = make_request(
+            &self.http_client,
+            &self.rate_limiter,
+            &format!("/recommendations/v1/papers/forpaper/{}", paper_id),
+            Some(&params),
+            Some("https://api.semanticscholar.org"),
+        )
+        .await?;
 
         let formatted_result = self.format_recommendations(&result)?;
+
+        let query = Query {
+            action: "paper_recommendations_single".into(),
+            text: paper_id.into(),
+            embedding,
+            params: Some(params),
+            results: json!(formatted_result),
+        };
+
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
+        }
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,
@@ -412,24 +411,7 @@ impl ToolExecutor for PaperRecommendationMultiTool {
         // Generate an embedding for the query
         let embedding = self.embed.embed(&query_text).await?;
 
-        // Check if we have a cached result for a similar query
-        let similar_queries = self.cache.search_similarity(&embedding)?;
-
-        // If we have a similar cached query, return that result
-        if let Some((similar_query, similarity)) = similar_queries.first() {
-            if similarity > &0.95 {
-                log::debug!(
-                    "Using cached recommendation result with similarity {}",
-                    similarity
-                );
-                let formatted_result = self.format_recommendations(&similar_query.results)?;
-                return Ok(vec![ToolContent::Text {
-                    text: formatted_result,
-                }]);
-            }
-        }
-
-        // Otherwise, make the API request
+        // Create the request body for later use and caching
         let request_body = json!({
             "positivePaperIds": positive_ids,
             "negativePaperIds": negative_paper_ids,
@@ -437,6 +419,24 @@ impl ToolExecutor for PaperRecommendationMultiTool {
             "limit": limit
         });
 
+        // Check if we have a cached result for a similar query
+        let similar_queries = self.cache.search_similarity(&embedding)?;
+
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "paper_recommendations_multi" {
+                // Check if parameters match
+                if cached_query.params == Some(request_body.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    let formatted_result = self.format_recommendations(&cached_query.results)?;
+                    return Ok(vec![ToolContent::Text {
+                        text: formatted_result,
+                    }]);
+                }
+            }
+        }
+
+        // Otherwise, make the API request
         let result = make_request(
             &self.http_client,
             &self.rate_limiter,
@@ -446,18 +446,20 @@ impl ToolExecutor for PaperRecommendationMultiTool {
         )
         .await?;
 
+        let formatted_result = self.format_recommendations(&result)?;
+
         // Store the result in the cache
         let query = Query {
+            action: "paper_recommendations_multi".into(),
             text: query_text,
             embedding,
+            params: Some(request_body),
             results: result.clone(),
         };
 
         if let Err(e) = self.cache.store(query) {
-            log::error!("Failed to store query in cache: {}", e);
+            log::warn!("Failed to store query in cache: {}", e);
         }
-
-        let formatted_result = self.format_recommendations(&result)?;
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,

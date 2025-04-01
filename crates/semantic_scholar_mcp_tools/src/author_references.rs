@@ -31,7 +31,7 @@ impl PaperReferencesTool {
         }
     }
 
-    pub(crate) fn format_references(&self, response: &Value) -> Result<String> {
+    fn format_references(&self, response: &Value) -> Result<String> {
         if response.get("error").is_some() {
             let message = response["error"]["message"]
                 .as_str()
@@ -181,57 +181,57 @@ impl ToolExecutor for PaperReferencesTool {
             return Err(anyhow!("Limit cannot exceed 1000"));
         }
 
-        // Create a query string for cache lookup
-        let query_text = format!(
-            "paper_references:{}:offset={}:limit={}:fields={:?}",
-            paper_id, offset, limit, fields
-        );
+        let mut params_map = serde_json::Map::new();
+        params_map.insert("offset".to_string(), json!(offset));
+        params_map.insert("limit".to_string(), json!(limit));
 
-        // Generate embedding for the query
-        let embedding = self.embed.embed(&query_text).await?;
+        if let Some(f) = fields {
+            params_map.insert("fields".to_string(), f);
+        }
 
-        // Check cache for similar queries
+        let params = Value::Object(params_map);
+
+        // Generate an embedding for the query
+        let embedding = self.embed.embed(&paper_id).await?;
+
+        // Check if we have a cached result for a similar query
         let similar_queries = self.cache.search_similarity(&embedding)?;
 
-        let result = if !similar_queries.is_empty() && similar_queries[0].1 > 0.95 {
-            // Use cached result if similarity is high
-            log::info!("Using cached result for paper references query");
-            similar_queries[0].0.results.clone()
-        } else {
-            // Make API request if no suitable cache entry found
-            let mut params_map = serde_json::Map::new();
-            params_map.insert("offset".to_string(), json!(offset));
-            params_map.insert("limit".to_string(), json!(limit));
-
-            if let Some(f) = fields {
-                params_map.insert("fields".to_string(), f);
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "paper_references" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
             }
+        }
 
-            let params = Value::Object(params_map);
-
-            let api_result = make_request(
-                &self.http_client,
-                &self.rate_limiter,
-                &format!("/paper/{}/references", paper_id),
-                Some(&params),
-                None,
-            )
-            .await?;
-
-            // Store the result in cache
-            let query = Query {
-                text: query_text,
-                embedding,
-                results: api_result.clone(),
-            };
-            if let Err(e) = self.cache.store(query) {
-                log::error!("Failed to store query in cache: {}", e);
-            }
-
-            api_result
-        };
+        let result = make_request(
+            &self.http_client,
+            &self.rate_limiter,
+            &format!("/paper/{}/references", paper_id),
+            Some(&params),
+            None,
+        )
+        .await?;
 
         let formatted_result = self.format_references(&result)?;
+
+        let query = Query {
+            action: "paper_references".into(),
+            text: paper_id.into(),
+            embedding,
+            params: Some(params),
+            results: json!(formatted_result),
+        };
+
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
+        }
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,

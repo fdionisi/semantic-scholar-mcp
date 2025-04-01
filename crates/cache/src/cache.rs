@@ -10,7 +10,9 @@ pub struct CacheEntry<T> {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct Query {
+    pub action: String,
     pub text: String,
+    pub params: Option<Value>,
     pub embedding: Vec<f32>,
     pub results: Value,
 }

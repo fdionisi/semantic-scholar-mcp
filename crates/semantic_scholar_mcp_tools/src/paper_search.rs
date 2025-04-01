@@ -32,7 +32,7 @@ impl PaperSearchTool {
         }
     }
 
-    pub(crate) fn format_search_results(&self, response: &Value) -> Result<String> {
+    fn format_search_results(&self, response: &Value) -> Result<String> {
         if response.get("error").is_some() {
             let message = response["error"]["message"]
                 .as_str()
@@ -159,24 +159,6 @@ impl ToolExecutor for PaperSearchTool {
             return Err(anyhow!("Limit cannot exceed 100"));
         }
 
-        // Generate embedding for the query text
-        let embedding = self.embed.embed(query).await?;
-
-        // Check the cache for similar queries
-        let similar_queries = self.cache.search_similarity(&embedding)?;
-
-        // If we have similar queries in cache, use the most similar one
-        if !similar_queries.is_empty() && similar_queries[0].1 > 0.95 {
-            log::debug!("Using cached results for similar query");
-            let cached_query = &similar_queries[0].0;
-            let result: Value = cached_query.results.clone();
-            let formatted_result = self.format_search_results(&result)?;
-            return Ok(vec![ToolContent::Text {
-                text: formatted_result,
-            }]);
-        }
-
-        // If no cache hit, perform the API request
         let params = json!({
             "query": query,
             "fields": fields,
@@ -190,6 +172,25 @@ impl ToolExecutor for PaperSearchTool {
             "fields_of_study": args.get("fields_of_study")
         });
 
+        // Generate an embedding for the query
+        let embedding = self.embed.embed(&query).await?;
+
+        // Check if we have a cached result for a similar query
+        let similar_queries = self.cache.search_similarity(&embedding)?;
+
+        // Check for any cached queries with high similarity and matching action/params
+        for (cached_query, similarity) in similar_queries.iter() {
+            if similarity > &0.95 && cached_query.action == "paper_search" {
+                // Check if parameters match
+                if cached_query.params == Some(params.clone()) {
+                    log::debug!("Found cached result with similarity {}", similarity);
+                    return Ok(vec![ToolContent::Text {
+                        text: serde_json::from_value(cached_query.results.clone())?,
+                    }]);
+                }
+            }
+        }
+
         let result = make_request(
             &self.http_client,
             &self.rate_limiter,
@@ -199,19 +200,19 @@ impl ToolExecutor for PaperSearchTool {
         )
         .await?;
 
-        // Store the result in cache
-        let cache_entry = Query {
-            text: query.to_string(),
+        let formatted_result = self.format_search_results(&result)?;
+
+        let query = Query {
+            action: "paper_search".into(),
+            text: query.into(),
             embedding,
-            results: result.clone(),
+            params: Some(params),
+            results: json!(formatted_result),
         };
 
-        // Ignore error when storing in cache to not impact the user experience
-        if let Err(e) = self.cache.store(cache_entry) {
-            log::error!("Failed to store query in cache: {}", e);
+        if let Err(err) = self.cache.store(query) {
+            log::warn!("Failed to store query in cache: {}", err);
         }
-
-        let formatted_result = self.format_search_results(&result)?;
 
         Ok(vec![ToolContent::Text {
             text: formatted_result,
